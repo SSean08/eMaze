@@ -1,0 +1,44 @@
+#!/bin/bash
+
+# Configuration: Update with your board's details
+# Use 'arduino-cli board list' to find these values
+BOARD_FQBN="arduino:avr:uno"
+PORT="/dev/ttyACM0"
+
+# 1. Check if a file argument was passed
+if [ -z "$1" ]; then
+    echo "Error: No file argument supplied."
+    echo "Usage: $0 path/to/your_sketch.ino"
+    exit 1
+fi
+
+SKETCH_FILE=$1
+
+# 2. Check if the file exists
+if [ ! -f "$SKETCH_FILE" ]; then
+    echo "Error: File '$SKETCH_FILE' not found."
+    exit 1
+fi
+
+# 3. Compile the sketch
+echo "Compiling $SKETCH_FILE for $BOARD_FQBN..."
+arduino-cli compile --fqbn "$BOARD_FQBN" "$SKETCH_FILE"
+
+if [ $? -ne 0 ]; then
+    echo "Error: Compilation failed. Aborting upload."
+    exit 1
+fi
+echo "Compilation successful!"
+
+# 4. Upload the sketch
+echo "Uploading to $BOARD_FQBN on port $PORT..."
+arduino-cli upload -p "$PORT" --fqbn "$BOARD_FQBN" "$SKETCH_FILE"
+
+# 5. Check if upload was successful
+if [ $? -eq 0 ]; then
+    echo "Upload successful!"
+else
+    echo "Error: Upload failed."
+    exit 1
+fi
+
