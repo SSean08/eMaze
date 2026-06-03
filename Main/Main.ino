@@ -11,7 +11,10 @@
 #include <math.h>
 #include <Wire.h>
 #include <VL53L0X.h>
-#include "Filter.h"
+#include "ToFFilter.h"
+#include <PID_v1.h>
+
+#define DBG
 
 
 /*
@@ -20,7 +23,7 @@
 
 
 const int MAX_REFRESH_RATE = 100; // Hz
-const int REFRESH_PERIOD = 1 / MAX_REFRESH_RATE * 1000000; // uS
+const int REFRESH_PERIOD = (int) (1.0f / MAX_REFRESH_RATE * 1000000); // uS
 
 // VL053L0X ToF Sensor Pins
 
@@ -29,9 +32,6 @@ const int INTERRUPT_LEFT = 3;
 
 const int XSHUT_RIGHT = 11;
 const int INTERRUPT_RIGHT = 5;
-
-const int XSHUT_FRONT = 6;
-const int INTERRUPT_FRONT = 7;
 
 
 // LM298N Motor Driver Pins
@@ -46,31 +46,20 @@ const int MOTOR_LEFT_PWM = 9;
 const int MOTOR_RIGHT_PWM = 10;
 
 // PID
-// const float Kp = 0.25;
-// const float Ki = 0.2;
-// const float Kd = 0.01;
-const float Kp = 0.25f;
-const float Ki = 0.0f;
-const float Kd = 0.0f;
-
-const int ALPHA = 0.2;
+const double Kp = 0.09f;
+const double Ki = 0.0f;
+const double Kd = 0.0f;
+double setPoint = 0.0f;
+double PIDinput = 0.0f;
+double PIDoutput = 0.0f;
 
 // Default Speed
-const int DEFAULT_SPEED = 0.13*255; // 20% of max speed (255)
+const int DEFAULT_SPEED = 0.175*255; // 20% of max speed (255)
 const float rotationSpeedRelativeToDefault = 0.2*255; // Old default speed
 const long rotationCount = 11000; // Number of iterations to turn 90 degrees, this is a hyperparameter that can be tuned based on the robot's turning speed and desired turning angle.
 
-// Far wall threshold
-// If the distance to the wall is greater than this threshold, it will be considered as no wall.
-const int farWallThreshold = 130; // cm
-// If the distance to the wall is less than this threshold, it will be considered as near wall.
-const int nearWallThreshold = 15; // cm
-// Front near wall threshold
-// Lesser so that left wall will be prioritized always.
-const int frontNearWallThreshold = 50; // cm
-
-
-
+// Calibration offset for the difference of the left and right ToF sensors.
+const int calibrationOffset = 3; // mm, this can be tuned based on the actual readings of the sensors when the robot is centered between the walls.
 
 
 
@@ -82,37 +71,53 @@ const int frontNearWallThreshold = 50; // cm
 long beginTime = 0, endTime;
 float motorSpeedLeft = 0, motorSpeedRight = 0;
 
-// Integral controller
-float integralSum = .0f;
-float lastError = .0f;
-unsigned long lastTime = 0;
-
-// Derivative controller
-float lastDerivativeError = .0f;
-float filteredDerivative = .0f;
-
 // Initialize ToF sensors
-VL53L0X sensorFront;
 VL53L0X sensorLeft;
 VL53L0X sensorRight;
 
 //Instantiate filters for each sensor with alpha = 0.2 (tunable)
-ToFFilter filterFront(0.2f);
 ToFFilter filterLeft(0.2f);
 ToFFilter filterRight(0.2f);
 
+
 // ToF sensor distance readings
-uint16_t distanceFront = 0;
-uint16_t distanceLeft = 0;
-uint16_t distanceRight = 0;
-
-
+int distanceLeft = 0;
+int distanceRight = 0;
+bool sensorReady = false; // Flag to indicate if sensors are initialized and ready
+// PID controller for centering
+PID centeringPID(&PIDinput, &PIDoutput, &setPoint, Kp, Ki, Kd, DIRECT);
 
 
 
 /*
   USER-DEFINED FUNCTIONS HERE
 */
+
+#include <Wire.h>
+
+void i2c_recovery() {
+  pinMode(SCL, OUTPUT);
+  digitalWrite(SCL, HIGH); // Set clock high
+  
+  // Pulse the clock 9 times to force slave to release SDA
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(SCL, LOW);
+    delayMicroseconds(5);
+    digitalWrite(SCL, HIGH);
+    delayMicroseconds(5);
+  }
+  
+  // Send a Stop Condition
+  pinMode(SDA, OUTPUT);
+  digitalWrite(SDA, LOW);
+  delayMicroseconds(5);
+  digitalWrite(SDA, HIGH);
+  
+  // Re-initialize the I2C bus
+  Wire.end();
+  Wire.begin();
+}
+
 
 
 void stopMotors() {
@@ -192,18 +197,23 @@ void turn(int direction) {
 
 void setup() {
   delay(1000);
+
+  i2c_recovery();
+
+  // Use built-in LED as Debug pin, it is high when system refresh rate < 250Hz
+  pinMode(LED_BUILTIN, OUTPUT);
+
   // Serial communication bitrate
 
 
   Serial.begin(115200);
   Wire.begin();
+  Wire.setClock(400000);
+  Wire.setTimeout(1000);
   Serial.println("I2C Initialized!");
 
 
   // Setup ToF sensor pins
-  pinMode(XSHUT_FRONT, OUTPUT);
-  pinMode(INTERRUPT_FRONT, INPUT);
-
   pinMode(XSHUT_LEFT, OUTPUT);
   pinMode(INTERRUPT_LEFT, INPUT);
 
@@ -211,51 +221,39 @@ void setup() {
   pinMode(INTERRUPT_RIGHT, INPUT);
 
   // Set ToF sensor unique addresses
-  digitalWrite(XSHUT_FRONT, LOW);
   digitalWrite(XSHUT_LEFT, LOW);
   digitalWrite(XSHUT_RIGHT, LOW);
   delay(100);
 
   Serial.println("Setting ToF sensor unique addresses...");
 
-  Serial.println("Setting front sensor address...");
-
-  // Front sensor
-  digitalWrite(XSHUT_FRONT, HIGH);
-  sensorFront.setTimeout(2000);
-  delay(100);
-  if (!sensorFront.init()) {
-    Serial.println("Failed to set ToF front sensor address!");
-  } else {
-    sensorFront.setAddress(0x30); // Set unique I2C address for front sensor  
-    Serial.println("Front sensor address set!");
-  }
-
-
-
   Serial.println("Setting left sensor address...");
   // Left sensor
   digitalWrite(XSHUT_LEFT, HIGH);
   sensorLeft.setTimeout(2000);
-  delay(100);
+  delay(500);
   if (!sensorLeft.init()) {
     Serial.println("Failed to set ToF left sensor address!");
+    sensorReady = false; // Sensors failed to initialize, set flag to false
   } else {
-    sensorLeft.setAddress(0x40); // Set unique I2C address for left sensor
+    sensorLeft.setAddress(0x49); // Set unique I2C address for left sensor
     Serial.println("Left sensor address set!");
+    sensorReady = true; // Mark sensor as ready
   }
 
 
   Serial.println("Setting right sensor address...");
   // Right sensor
   digitalWrite(XSHUT_RIGHT, HIGH);
-  delay(100);
+  delay(500);
   sensorRight.setTimeout(2000);
   if (!sensorRight.init()) {
     Serial.println("Failed to set ToF right sensor address!");
+    sensorReady = false; // Sensors failed to initialize, set flag to false
   } else {
-    sensorRight.setAddress(0x50); // Set unique I2C address for right sensor
+    sensorRight.setAddress(0x59); // Set unique I2C address for right sensor
     Serial.println("Right sensor address set!");
+    sensorReady = true; // Mark sensor as ready
   }
 
   Serial.println("ToF sensors initialized with unique addresses!");
@@ -266,9 +264,24 @@ void setup() {
 
   sensorLeft.setMeasurementTimingBudget(20000);
   sensorRight.setMeasurementTimingBudget(20000);
-  sensorFront.setMeasurementTimingBudget(20000);
+
+  if (sensorReady) {
+    Serial.println("All sensors initialized successfully! Starting continuous measurement...");
+  } else {
+    Serial.println("One or more sensors failed to initialize. Please check connections and try again.");
+    while (true) {
+      // Halt the program if sensors are not ready
+      delay(500);
+      digitalWrite(LED_BUILTIN, HIGH); // Turn on built-in LED to indicate error state
+      delay(500);
+      digitalWrite(LED_BUILTIN, LOW); // Turn on built-in LED to indicate error state
+    }
+  }
+
+  Serial.println("Starting continous measurement");
+  sensorLeft.startContinuous();
+  sensorRight.startContinuous();
   Serial.println("Sensor setup done");
-  
 
   delay(1000);
 
@@ -284,12 +297,12 @@ void setup() {
   pinMode(MOTOR_LEFT_PWM, OUTPUT);
   pinMode(MOTOR_RIGHT_PWM, OUTPUT);
 
-  // Use built-in LED as Debug pin, it is high when system refresh rate < 250Hz
-  pinMode(LED_BUILTIN, OUTPUT);
-
-  lastTime = micros();
-
   
+
+  // Configure PID controller
+  centeringPID.SetMode(AUTOMATIC); // Enable PID computation
+  centeringPID.SetOutputLimits(-180, 180); // Allow negative/positive corrections (expanded to prevent clipping)
+  Serial.println("PID configured: AUTOMATIC, limits [-180,180]");
 }
 
 
@@ -297,115 +310,29 @@ void setup() {
 void loop() {
   beginTime = micros();
 
-  float dt = (beginTime - lastTime) / 1000000.0; // Convert to seconds
+  // Read raw distance values from ToF sensors
+  uint16_t rawDistanceLeft = sensorLeft.readRangeContinuousMillimeters();
+  uint16_t rawDistanceRight = sensorRight.readRangeContinuousMillimeters();
 
-  if (dt <= 0.0) return;
-  lastTime = beginTime;
+  // Update filtered distance values using the ToFFilter class
+  distanceLeft = filterLeft.update(rawDistanceLeft);
+  distanceRight = filterRight.update(rawDistanceRight);
 
-  // // Main control loop code
-
-  // //Read sensors
-
-  // Save previous distances for filtering
-  if (firstReadLeft) {
-    previousDistanceLeft = distanceLeft;
-    firstReadLeft = false;
-  } else if (abs(previousDistanceLeft - distanceLeft) > 200) {
-    // If the distance suddenly changes by more than 20 cm, we can consider it as noise and use the previous distance instead.
-    distanceLeft = previousDistanceLeft;
-  } else {
-    previousDistanceLeft = distanceLeft;
+  // PID control for wall following
+  PIDinput = (distanceLeft - distanceRight) - calibrationOffset; // Calculate the error
+  if (abs(PIDinput) <= 3) {
+    PIDinput = 0;
   }
+  centeringPID.Compute();
+  motorSpeedLeft = DEFAULT_SPEED + PIDoutput;
+  motorSpeedRight = DEFAULT_SPEED - PIDoutput;
 
-  if (firstReadRight) {
-    previousDistanceRight = distanceRight;
-    firstReadRight = false;
-  } else if (abs(previousDistanceRight - distanceRight) > 200) {
-    // If the distance suddenly changes by more than 20 cm, we can consider it as noise and use the previous distance instead.
-    distanceRight = previousDistanceRight;
-  } else {
-    previousDistanceRight = distanceRight;
-  }
+  // Clamps motor speeds to 33 and 55 to prevent excessive speed.
+  motorSpeedLeft = constrain(motorSpeedLeft, 33, 60);
+  motorSpeedRight = constrain(motorSpeedRight, 33, 60);
 
-
-
-  // Serial.print("Front: ");
-  // Serial.print(distanceFront);
-  // Serial.print(" cm, Left: ");
-  // Serial.print(distanceLeft);
-  // Serial.print(" cm, Right: ");
-  // Serial.print(distanceRight);
-  // Serial.println(" cm");
-
-  float centeringError = (distanceLeft - distanceRight);
-
-  integralSum += ((centeringError + lastError) / 2.0) * dt; // Trapezoidal integration
-
-  float rawDerivative = ((centeringError - lastDerivativeError) /dt);
-  filteredDerivative = (ALPHA * rawDerivative) + ((1.0 - ALPHA) * filteredDerivative);
-
-  lastDerivativeError = centeringError;
-
-  // Reset integral when centeringError are withing -5 <= centeringError <=5;
-    if (centeringError >= -5 && centeringError <= 5) {
-      integralSum = 0;
-      filteredDerivative = 0;
-    }
-
-  // OLD PID CODE
-  if (centeringError > 0) {
-    // If the left distance is greater than the right distance, it means that the robot is closer to the right wall and needs to turn left to center itself.
-    motorSpeedLeft = DEFAULT_SPEED;
-    motorSpeedRight = DEFAULT_SPEED + (int) (Kp * centeringError) + (int) (Ki * integralSum) + (int) (Kd * filteredDerivative);
-  } else if (centeringError < 0) {
-    // Turn left, centeringError is negative
-    motorSpeedLeft = DEFAULT_SPEED + (int) (-Kp * centeringError) + (int) (-Ki * integralSum) + (int) (-Kd * filteredDerivative);
-    motorSpeedRight = DEFAULT_SPEED;
-  } else {
-    // Go straight
-    motorSpeedLeft = DEFAULT_SPEED;
-    motorSpeedRight = DEFAULT_SPEED;
-  }
-
-  lastError = centeringError;
-
-  // // Walls scenarios
-  // if (distanceLeft > farWallThreshold) {
-  //   // No left wall, that means it's open, turn left
-  //   delay(1000);
-  //   turn(0);
-  //   turn(2);
-  //   goto END;
-  // } else if (distanceFront <= frontNearWallThreshold) {
-  //   // Near front wall, stop
-  //   motorSpeedLeft = 0;
-  //   motorSpeedRight = 0;
-
-  //   if (distanceRight > farWallThreshold) {
-  //     // No right wall, that means it's open, turn right
-  //     delay(1000);
-  //     turn(1);
-  //     goto END;
-  //   } else {
-  //     // Both left and right walls are blocked, go back
-  //     // Turn right twice.
-  //     delay(1000);
-  //     turn(1);
-  //     turn(1);
-  //     goto END;
-  //   }
-  // }
-
-  // Set motor speeds
-
-  // Clip integral windup and motor speeds to max PWM value (255)
-  motorSpeedLeft = constrain(motorSpeedLeft, 20, 50);
-  motorSpeedRight = constrain(motorSpeedRight, 20, 50);
-
-  // Print motorSpeedLeft and right and centeringError
-  Serial.println("Motor Speed Left:" + String(motorSpeedLeft) + ",Motor Speed Right:" + String(motorSpeedRight) + ",Centering Error:" + String(centeringError));
-
-  // Set motor directions and speeds
+  // Write PWM to motor driver to set speeds and directions
+  #ifndef DBG
   if (motorSpeedLeft > 0) {
     digitalWrite(MOTOR_LEFT_IN1, HIGH);
     digitalWrite(MOTOR_LEFT_IN2, LOW);
@@ -413,7 +340,7 @@ void loop() {
   } else {
     digitalWrite(MOTOR_LEFT_IN1, LOW);
     digitalWrite(MOTOR_LEFT_IN2, HIGH);
-    analogWrite(MOTOR_LEFT_PWM, -motorSpeedLeft);
+    analogWrite(MOTOR_LEFT_PWM, motorSpeedLeft);
   }
 
   if (motorSpeedRight > 0) {
@@ -423,10 +350,25 @@ void loop() {
   } else {
     digitalWrite(MOTOR_RIGHT_IN1, LOW);
     digitalWrite(MOTOR_RIGHT_IN2, HIGH);
-    analogWrite(MOTOR_RIGHT_PWM, -motorSpeedRight);
+    analogWrite(MOTOR_RIGHT_PWM, motorSpeedRight); 
   }
+  #endif
 
-  END:
+  #ifdef DBG
+  //Print motor speeds and distances for debugging
+  Serial.print("L:");
+  Serial.print(distanceLeft);
+  Serial.print(" R:");
+  Serial.print(distanceRight);
+  Serial.print(" Err:");
+  Serial.print(PIDinput);
+  Serial.print(" Out:");
+  Serial.print(PIDoutput);
+  Serial.print(" ML:");
+  Serial.print(motorSpeedLeft);
+  Serial.print(" MR:");
+  Serial.println(motorSpeedRight);
+  #endif
 
   if ((micros() - beginTime) > REFRESH_PERIOD) {
     digitalWrite(LED_BUILTIN, 1);

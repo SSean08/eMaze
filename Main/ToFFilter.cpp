@@ -7,20 +7,33 @@ ToFFilter::ToFFilter(float filterAlpha) {
   memset(rangeWindow, 0, sizeof(rangeWindow));
 }
 
+void ToFFilter::quickSort(int arr[], int left, int right) {
+  int i = left, j = right;
+  int pivot = arr[(left + right) / 2];
+
+  while (i <= j) {
+    while (arr[i] < pivot) i++;
+    while (arr[j] > pivot) j--;
+    if (i <= j) {
+      int tmp = arr[i];
+      arr[i] = arr[j];
+      arr[j] = tmp;
+      i++;
+      j--;
+    }
+  }
+
+  if (left < j)  quickSort(arr, left, j);
+  if (i < right) quickSort(arr, i, right);
+}
+
 int ToFFilter::getMedian() {
   int tempArray[WINDOW_SIZE];
   memcpy(tempArray, rangeWindow, WINDOW_SIZE * sizeof(int));
 
-  // Simple bubble sort
-  for (int i = 0; i < WINDOW_SIZE - 1; i++) {
-    for (int j = 0; j < WINDOW_SIZE - i - 1; j++) {
-      if (tempArray[j] > tempArray[j + 1]) {
-        int temp = tempArray[j];
-        tempArray[j] = tempArray[j + 1];
-        tempArray[j + 1] = temp;
-      }
-    }
-  }
+  // Execute quicksort on the temporary array copy
+  quickSort(tempArray, 0, WINDOW_SIZE - 1);
+  
   return tempArray[WINDOW_SIZE / 2];
 }
 
@@ -34,7 +47,7 @@ int ToFFilter::update(int rawReading) {
   rangeWindow[windowIndex] = rawReading;
   windowIndex = (windowIndex + 1) % WINDOW_SIZE;
 
-  // 2. Extract the median to drop single-sample spikes
+  // 2. Extract the median using Quicksort to drop spikes
   int medianDistance = getMedian();
 
   // 3. Apply Exponential Moving Average (EMA) to smooth out continuous jitter
