@@ -14,7 +14,7 @@
 #include "ToFFilter.h"
 #include <PID_v1.h>
 
-// #define DBG
+#define DBG
 
 
 /*
@@ -52,24 +52,24 @@ const int MOTOR_LEFT_PWM = 9;
 const int MOTOR_RIGHT_PWM = 10;
 
 // PID
-const double Kp = 0.09f;
-const double Ki = 0.1f;
-const double Kd = 0.05f;
+const double Kp = 0.05f;
+const double Ki = 0.0f;
+const double Kd = 0.01f;
 double setPoint = 0.0f;
 double PIDinput = 0.0f;
 double PIDoutput = 0.0f;
 
 // Default Speed
-const int DEFAULT_SPEED = 0.175*255; // 20% of max speed (255)
+const int DEFAULT_SPEED = 0.15*255; // 20% of max speed (255)
 const float rotationSpeedRelativeToDefault = 0.2*255; // Old default speed
-const long rotationCount = 6350; // Number of iterations to turn 90 degrees, this is a hyperparameter that can be tuned based on the robot's turning speed and desired turning angle.
+const long rotationCount = 11000; // Number of iterations to turn 90 degrees, this is a hyperparameter that can be tuned based on the robot's turning speed and desired turning angle.
 
 // Calibration offset for the difference of the left and right ToF sensors.
 const int calibrationOffset = 3; // mm, this can be tuned based on the actual readings of the sensors when the robot is centered between the walls.
 
 // Wall thresholds
 const float openWallThreshold = 160.0f; // mm, if the distance is greater than this, we consider it as an open wall (no wall).
-const float frontWallThreshold = 20.0f; // mm, if the front distance is less than this, we consider it as an obstacle in front of the robot.
+const float frontWallThreshold = 40.0f; // mm, if the front distance is less than this, we consider it as an obstacle in front of the robot.
 
 
 /*
@@ -109,15 +109,11 @@ void resetData() {
   distanceFront = 0;
   distanceLeft = 0;
   distanceRight = 0;
+  filterLeft.update(0);
+  filterRight.update(0);
+  filterLeft.update(0);
+  filterRight.update(0);
   PIDinput = 0;
-  
-  filterLeft.update(0);
-  filterRight.update(0);
-  filterLeft.update(0);
-  filterRight.update(0);
-  filterLeft.update(0);
-  filterRight.update(0);
-
   delay(100);
 }
 
@@ -186,9 +182,24 @@ void turn(int direction) {
 
    #ifdef DBG
   //Print motor speeds and distances for debugging
-  Serial.print("Turning: ");
-  Serial.println(direction);
+  Serial.print("L:");
+  Serial.print(distanceLeft);
+  Serial.print(" R:");
+  Serial.print(distanceRight);
+  Serial.print(" F:");
+  Serial.print(distanceFront);
+  Serial.print(" Err:");
+  Serial.print(PIDinput);
+  Serial.print(" Out:");
+  Serial.print(PIDoutput);
+  Serial.print(" ML:");
+  Serial.print(motorSpeedLeft);
+  Serial.print(" MR:");
+  Serial.println(motorSpeedRight);
   #endif
+
+  resetData();
+ 
 
   for (int i = 0 ; i < rotationCount; i++) {
       // Set motor speeds for turning
@@ -208,19 +219,18 @@ void turn(int direction) {
     }
 
     if (direction == 2) {
-      for (int i = 0; i < 13000; i++) {
+      for (int i = 0; i < 1000; i++) {
         // If going forward, we can set the motor speeds to default speed.
-        // Serial.println("Moving forward...");
+        Serial.println("Moving forward...");
         digitalWrite(MOTOR_LEFT_IN1, HIGH);
         digitalWrite(MOTOR_LEFT_IN2, LOW);
         analogWrite(MOTOR_LEFT_PWM, motorSpeedLeft);
         digitalWrite(MOTOR_RIGHT_IN1, HIGH);
         digitalWrite(MOTOR_RIGHT_IN2, LOW);
         analogWrite(MOTOR_RIGHT_PWM, motorSpeedRight);
-      }; // Skip the rest of the loop and continue going forward.
-      goto END;
+      }
+      return; // Skip the rest of the loop and continue going forward.
     }
-
     
 
     
@@ -245,8 +255,6 @@ void turn(int direction) {
     }
 
   }
-  END:
-  resetData();
   stopMotors(); // Stop the robot after turning for the specified count, this will ensure that the robot will not keep turning indefinitely.
 }
 
@@ -401,34 +409,36 @@ void loop() {
     Serial.println("Turning left");
     resetData();
     turn(0); // Turn left
-    delay(200); // Delay for turn
+    delay(1000); // Delay for turn
     // Move forward to enter wall
     turn(2); // Move forward
-    delay(200); // Delay for moving forward
+    delay(1000); // Delay for moving forward
 
   } else if (distanceFront <= frontWallThreshold) {
+    resetData();
     Serial.println("Obstacle...");
     // If front is blocked, turn right
     stopMotors();
-    delay(200); // Delay for turn
+    delay(1000); // Delay for turn
 
     // Check if right wall is open
     if (distanceRight >= openWallThreshold) {
       Serial.println("Turning right...");
+      resetData();
       turn(1); // Turn right
-      delay(200); // Delay for turn
+      delay(1000); // Delay for turn
 
       // Move forward to enter wall
       turn(2); // Move forward
-      delay(200); // Delay for moving forward
+      delay(1000); // Delay for moving forward
     } else {
       Serial.println("U-Turn");
       resetData();
       // If right wall is also blocked, u-turn
       turn(1); // Turn right
-      delay(200); // Delay for 90 degree turn, this can be tuned based
+      delay(1100); // Delay for 90 degree turn, this can be tuned based
       turn(1);
-      delay(200);
+      delay(1100);
     }
   }
 
