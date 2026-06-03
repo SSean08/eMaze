@@ -4,7 +4,7 @@
   That is, 4mS or 4000uS of period.
 
   This will implement a wall-hugging algorithm with the left wall with a PID controller to maintain a centered position.
-  This system will be using a ToF sensor to measure the wall's distances, particularly, the VL53L0X ToF sensor.
+  This system will be using two VL53L0X ToF sensors for wall distance and an HY-SRF05 ultrasonic sensor for the front distance.
 */
 
 // Libraries
@@ -14,13 +14,15 @@
 #include "ToFFilter.h"
 #include <PID_v1.h>
 
-#define DBG
+// #define DBG
 
 
 /*
   DEFINE AND INITIALIZE CONSTANTS HERE
 */
 
+// Speed of sound
+const float SPEED_OF_SOUND = 0.343; // mm/us
 
 const int MAX_REFRESH_RATE = 100; // Hz
 const int REFRESH_PERIOD = (int) (1.0f / MAX_REFRESH_RATE * 1000000); // uS
@@ -32,6 +34,10 @@ const int INTERRUPT_LEFT = 3;
 
 const int XSHUT_RIGHT = 11;
 const int INTERRUPT_RIGHT = 5;
+
+// Front sensor is an Ultra sonic sensor (HY-SRF05)
+const int TRIG_PIN = 6;
+const int ECHO_PIN = 7;
 
 
 // LM298N Motor Driver Pins
@@ -47,8 +53,8 @@ const int MOTOR_RIGHT_PWM = 10;
 
 // PID
 const double Kp = 0.09f;
-const double Ki = 0.0f;
-const double Kd = 0.0f;
+const double Ki = 0.1f;
+const double Kd = 0.05f;
 double setPoint = 0.0f;
 double PIDinput = 0.0f;
 double PIDoutput = 0.0f;
@@ -56,12 +62,14 @@ double PIDoutput = 0.0f;
 // Default Speed
 const int DEFAULT_SPEED = 0.175*255; // 20% of max speed (255)
 const float rotationSpeedRelativeToDefault = 0.2*255; // Old default speed
-const long rotationCount = 11000; // Number of iterations to turn 90 degrees, this is a hyperparameter that can be tuned based on the robot's turning speed and desired turning angle.
+const long rotationCount = 6350; // Number of iterations to turn 90 degrees, this is a hyperparameter that can be tuned based on the robot's turning speed and desired turning angle.
 
 // Calibration offset for the difference of the left and right ToF sensors.
 const int calibrationOffset = 3; // mm, this can be tuned based on the actual readings of the sensors when the robot is centered between the walls.
 
-
+// Wall thresholds
+const float openWallThreshold = 160.0f; // mm, if the distance is greater than this, we consider it as an open wall (no wall).
+const float frontWallThreshold = 20.0f; // mm, if the front distance is less than this, we consider it as an obstacle in front of the robot.
 
 
 /*
@@ -80,10 +88,12 @@ ToFFilter filterLeft(0.2f);
 ToFFilter filterRight(0.2f);
 
 
-// ToF sensor distance readings
+// Sensor distance readings
+int distanceFront = 0;
 int distanceLeft = 0;
 int distanceRight = 0;
 bool sensorReady = false; // Flag to indicate if sensors are initialized and ready
+
 // PID controller for centering
 PID centeringPID(&PIDinput, &PIDoutput, &setPoint, Kp, Ki, Kd, DIRECT);
 
@@ -94,6 +104,22 @@ PID centeringPID(&PIDinput, &PIDoutput, &setPoint, Kp, Ki, Kd, DIRECT);
 */
 
 #include <Wire.h>
+
+void resetData() {
+  distanceFront = 0;
+  distanceLeft = 0;
+  distanceRight = 0;
+  PIDinput = 0;
+  
+  filterLeft.update(0);
+  filterRight.update(0);
+  filterLeft.update(0);
+  filterRight.update(0);
+  filterLeft.update(0);
+  filterRight.update(0);
+
+  delay(100);
+}
 
 void i2c_recovery() {
   pinMode(SCL, OUTPUT);
@@ -120,6 +146,24 @@ void i2c_recovery() {
 
 
 
+long readUltrasonicFront() {
+  // Trigger the HY-SRF05 ultrasonic pulse and measure the echo time.
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  if (duration == 0) {
+    return -1;
+  }
+
+  // Calculate distance in millimeters
+  long distance = (duration / 2) * (SPEED_OF_SOUND);
+  return distance;
+}
+
 void stopMotors() {
   // This function will stop the robot by setting motor speeds to 0 and applying brakes.
   motorSpeedLeft = 0;
@@ -140,11 +184,17 @@ void turn(int direction) {
   // This function will stop the robot and make it turn with calculated rotation.
   // 0 = left, 1 = right, 2 = forward
 
+   #ifdef DBG
+  //Print motor speeds and distances for debugging
+  Serial.print("Turning: ");
+  Serial.println(direction);
+  #endif
+
   for (int i = 0 ; i < rotationCount; i++) {
       // Set motor speeds for turning
 
     if (direction == 0) {
-      // Turn left
+      // Turn leftturn(
       motorSpeedLeft = -rotationSpeedRelativeToDefault;
       motorSpeedRight = rotationSpeedRelativeToDefault;
     } else if (direction == 1) {
@@ -158,15 +208,19 @@ void turn(int direction) {
     }
 
     if (direction == 2) {
-      // If going forward, we can set the motor speeds to default speed.
-      digitalWrite(MOTOR_LEFT_IN1, HIGH);
-      digitalWrite(MOTOR_LEFT_IN2, LOW);
-      analogWrite(MOTOR_LEFT_PWM, motorSpeedLeft);
-      digitalWrite(MOTOR_RIGHT_IN1, HIGH);
-      digitalWrite(MOTOR_RIGHT_IN2, LOW);
-      analogWrite(MOTOR_RIGHT_PWM, motorSpeedRight);
-      continue; // Skip the rest of the loop and continue going forward.
+      for (int i = 0; i < 13000; i++) {
+        // If going forward, we can set the motor speeds to default speed.
+        // Serial.println("Moving forward...");
+        digitalWrite(MOTOR_LEFT_IN1, HIGH);
+        digitalWrite(MOTOR_LEFT_IN2, LOW);
+        analogWrite(MOTOR_LEFT_PWM, motorSpeedLeft);
+        digitalWrite(MOTOR_RIGHT_IN1, HIGH);
+        digitalWrite(MOTOR_RIGHT_IN2, LOW);
+        analogWrite(MOTOR_RIGHT_PWM, motorSpeedRight);
+      }; // Skip the rest of the loop and continue going forward.
+      goto END;
     }
+
     
 
     
@@ -191,6 +245,8 @@ void turn(int direction) {
     }
 
   }
+  END:
+  resetData();
   stopMotors(); // Stop the robot after turning for the specified count, this will ensure that the robot will not keep turning indefinitely.
 }
 
@@ -219,6 +275,11 @@ void setup() {
 
   pinMode(XSHUT_RIGHT, OUTPUT);
   pinMode(INTERRUPT_RIGHT, INPUT);
+
+  // Setup ultrasonic sensor pins
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
 
   // Set ToF sensor unique addresses
   digitalWrite(XSHUT_LEFT, LOW);
@@ -310,6 +371,10 @@ void setup() {
 void loop() {
   beginTime = micros();
 
+  // Read front ultrasonic distance first
+  long rawDistanceFront = readUltrasonicFront();
+  distanceFront = rawDistanceFront < 0 ? 0 : (int)rawDistanceFront;
+
   // Read raw distance values from ToF sensors
   uint16_t rawDistanceLeft = sensorLeft.readRangeContinuousMillimeters();
   uint16_t rawDistanceRight = sensorRight.readRangeContinuousMillimeters();
@@ -330,6 +395,44 @@ void loop() {
   // Clamps motor speeds to 33 and 55 to prevent excessive speed.
   motorSpeedLeft = constrain(motorSpeedLeft, 33, 60);
   motorSpeedRight = constrain(motorSpeedRight, 33, 60);
+
+  // If left wall is open, turn left
+  if (distanceLeft >= openWallThreshold) {
+    Serial.println("Turning left");
+    resetData();
+    turn(0); // Turn left
+    delay(200); // Delay for turn
+    // Move forward to enter wall
+    turn(2); // Move forward
+    delay(200); // Delay for moving forward
+
+  } else if (distanceFront <= frontWallThreshold) {
+    Serial.println("Obstacle...");
+    // If front is blocked, turn right
+    stopMotors();
+    delay(200); // Delay for turn
+
+    // Check if right wall is open
+    if (distanceRight >= openWallThreshold) {
+      Serial.println("Turning right...");
+      turn(1); // Turn right
+      delay(200); // Delay for turn
+
+      // Move forward to enter wall
+      turn(2); // Move forward
+      delay(200); // Delay for moving forward
+    } else {
+      Serial.println("U-Turn");
+      resetData();
+      // If right wall is also blocked, u-turn
+      turn(1); // Turn right
+      delay(200); // Delay for 90 degree turn, this can be tuned based
+      turn(1);
+      delay(200);
+    }
+  }
+
+
 
   // Write PWM to motor driver to set speeds and directions
   #ifndef DBG
@@ -360,6 +463,8 @@ void loop() {
   Serial.print(distanceLeft);
   Serial.print(" R:");
   Serial.print(distanceRight);
+  Serial.print(" F:");
+  Serial.print(distanceFront);
   Serial.print(" Err:");
   Serial.print(PIDinput);
   Serial.print(" Out:");
